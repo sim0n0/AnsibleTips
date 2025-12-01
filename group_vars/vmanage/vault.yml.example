@@ -1,0 +1,3 @@
+---
+# Encrypt this file with ansible-vault and set the authentication secret.
+vault_vmanage_password: "CHANGE_ME_AND_ENCRYPT_WITH_ANSIBLE_VAULT"

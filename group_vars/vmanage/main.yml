@@ -1,0 +1,5 @@
+---
+# Shared variables for the vManage group.
+vault_vmanage_password: ""  # Define in an ansible-vault encrypted file (group_vars/vmanage/vault.yml)
+backup_remote_dir: "/home/admin/backup"
+backup_local_dir: "{{ playbook_dir | default('.') }}/../backups"

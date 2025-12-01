@@ -1,0 +1,84 @@
+---
+- name: Backup Cisco vManage configuration database
+  hosts: vmanage
+  gather_facts: false
+  vars:
+    backup_remote_dir: "/home/admin/backup"
+    backup_local_dir: "{{ playbook_dir | default('.') }}/../backups"
+    backup_command: "request nms configuration-db backup path {{ backup_remote_dir }}"
+  tasks:
+    - name: Ensure local backup directory exists
+      ansible.builtin.file:
+        path: "{{ backup_local_dir }}"
+        state: directory
+        mode: "0750"
+      delegate_to: localhost
+      run_once: true
+
+    - name: Trigger vManage configuration database backup
+      ansible.builtin.command: "{{ backup_command }}"
+      register: backup_command_output
+      changed_when: true
+      failed_when: backup_command_output.rc != 0
+      vars:
+        ansible_ssh_password: "{{ vault_vmanage_password }}"
+
+    - name: Derive backup file path from command output when available
+      ansible.builtin.set_fact:
+        vmanage_backup_file: "{{ (backup_command_output.stdout + backup_command_output.stderr) | regex_search('(/[^\\s]*configuration-db_backup[^\\s]*)', '\\1') }}"
+      when: backup_command_output is defined
+
+    - name: Discover most recent backup file if path could not be parsed
+      ansible.builtin.find:
+        paths: "{{ backup_remote_dir }}"
+        patterns: "configuration-db_backup_*"
+        file_type: file
+        recurse: no
+      register: backup_candidates
+      when: vmanage_backup_file is not defined or not vmanage_backup_file
+
+    - name: Select latest backup file from discovery results
+      ansible.builtin.set_fact:
+        vmanage_backup_file: "{{ (backup_candidates.files | sort(attribute='mtime', reverse=True))[0].path }}"
+      when: vmanage_backup_file is not defined or not vmanage_backup_file
+
+    - name: Fail if no backup file could be identified
+      ansible.builtin.fail:
+        msg: "Unable to determine the backup file path on vManage."
+      when: vmanage_backup_file is not defined or not vmanage_backup_file
+
+    - name: Wait for backup file to exist
+      ansible.builtin.wait_for:
+        path: "{{ vmanage_backup_file }}"
+        state: present
+        timeout: 600
+
+    - name: Ensure backup file size is stable before transfer
+      ansible.builtin.shell: |
+        size1=$(stat -c %s {{ vmanage_backup_file }})
+        sleep 3
+        size2=$(stat -c %s {{ vmanage_backup_file }})
+        if [ "$size1" = "$size2" ]; then
+          echo "stable size: $size2 bytes"
+        else
+          echo "size changed: $size1 -> $size2"
+          exit 1
+        fi
+      register: backup_size_check
+      changed_when: false
+      until: backup_size_check.rc == 0
+      retries: 5
+      delay: 5
+
+    - name: Fetch backup locally
+      ansible.builtin.fetch:
+        src: "{{ vmanage_backup_file }}"
+        dest: "{{ backup_local_dir }}/"
+        flat: true
+      register: fetch_result
+
+    - name: Remove backup file from vManage
+      ansible.builtin.file:
+        path: "{{ vmanage_backup_file }}"
+        state: absent
+      when: fetch_result is succeeded
